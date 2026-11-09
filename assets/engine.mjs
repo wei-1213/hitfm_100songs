@@ -1,0 +1,39 @@
+export const norm=s=>String(s).normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu,'');
+const aliasGroups={'田馥甄':['Hebe','Hebe Tien','HEBE (S.H.E)'],'蔡依林':['JOLIN','Jolin Tsai','JOLIN 蔡依林'],'張惠妹':['aMEI','aMEI張惠妹','阿妹'],'林俊傑':['JJ Lin'],'吳克群':['吳克羣'],'畢書盡':['Bii','Bii畢書盡'],'鄧紫棋':['G.E.M.','G.E.M.鄧紫棋'],'S.H.E':['SHE']};
+const aliases=new Map;for(const [k,v]of Object.entries(aliasGroups))for(const a of [k,...v])aliases.set(norm(a),k);
+const spellings=new Map;
+export function canonical(s){return aliases.get(norm(s))||spellings.get(norm(s))||(spellings.set(norm(s),s.trim()),s.trim())}
+const protectedNames=['HUNTR/X','&TEAM','KING & PRINCE','GD&T.O.P','SUPER JUNIOR-D&E','SUPER JUNIOR東海&銀赫','伍佰 & CHINA BLUE','伍佰&CHINA BLUE','修二&彰','瀧&翼','Ben&Ben','AC/DC'];
+export function artists(credit){let t=credit;const restore=new Map;protectedNames.forEach((p,i)=>{const token=`PROTECTED${i}END`;if(t.toLowerCase().includes(p.toLowerCase())){t=t.replace(new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'gi'),token);restore.set(token,canonical(p))}});return [...new Set(t.split(/\s*(?:\bfeat\.?|\bfeaturing\b|[+＋/／&＆、,，]|\s+[xX×]\s+)\s*/i).filter(Boolean).map(p=>canonical(restore.get(p)||p)))];}
+export const matches=(q,credit)=>artists(credit).some(a=>norm(a).includes(norm(canonical(q))));
+const allowedFilters=new Set(['years','start','end','minRank','maxRank','artists','excludeArtists','song','album','excludeSongs']);
+const list=(v,k)=>{if(!Array.isArray(v)||v.length>30||v.some(x=>typeof x!=='string'||!x.trim()))throw Error(`${k} 的格式不正確`);return v};
+const integer=(v,k,min,max)=>{if(!Number.isInteger(v)||v<min||v>max)throw Error(`${k} 應在 ${min}–${max} 之間`);return v};
+export function select(data,f={}){if(!f||typeof f!=='object'||Array.isArray(f)||Object.keys(f).some(k=>!allowedFilters.has(k)))throw Error('查詢條件含有不支援的欄位');const start=integer(f.start??1998,'起始年份',1900,2100),end=integer(f.end??2025,'結束年份',1900,2100);if(start>end)throw Error('起始年份不能晚於結束年份');let years=f.years??Array.from({length:end-start+1},(_,i)=>start+i);if(!Array.isArray(years)||!years.length||years.length>201)throw Error('年份格式不正確');years.forEach(y=>integer(y,'年份',1900,2100));const min=integer(f.minRank??1,'最低名次',1,100),max=integer(f.maxRank??100,'最高名次',1,100);if(min>max)throw Error('名次範圍順序不正確');for(const k of ['artists','excludeArtists','excludeSongs'])if(f[k]!==undefined)list(f[k],k);for(const k of ['song','album'])if(f[k]!==undefined&&(typeof f[k]!=='string'||!norm(f[k])))throw Error('搜尋文字不能空白');const rows=data.filter(r=>years.includes(r.year)&&r.rank>=min&&r.rank<=max&&(!f.artists?.length||f.artists.some(a=>matches(a,r.artist)))&&!f.excludeArtists?.some(a=>matches(a,r.artist))&&(!f.song||norm(r.song).includes(norm(f.song)))&&(!f.album||norm(r.album).includes(norm(f.album)))&&!f.excludeSongs?.some(s=>norm(s)===norm(r.song)));return {rows,unavailable:years.filter(y=>y<1998||y>2025)}}
+export function execute(data,plan){if(!plan||!['query','stats','recommend'].includes(plan.tool))throw Error('這個問題需要再補充查詢條件');const fields=new Set(['tool','filters','group','perYear','metric','top','count','seedSong','distinct','sort','limit']);if(Object.keys(plan).some(k=>!fields.has(k)))throw Error('工具請求含不支援的參數');const {rows,unavailable}=select(data,plan.filters||{});if(plan.tool==='query'){const sort=plan.sort??'year';if(!['year','rank','newest'].includes(sort))throw Error('排序條件不支援');rows.sort((a,b)=>sort==='rank'?a.rank-b.rank||a.year-b.year:sort==='newest'?b.year-a.year||a.rank-b.rank:a.year-b.year||a.rank-b.rank);const limit=integer(plan.limit??300,'顯示筆數',1,2800);return {type:'query',rows:rows.slice(0,limit),total:rows.length,unavailable,truncated:rows.length>limit}}
+if(plan.tool==='stats'){const group=plan.group??'artist',metric=plan.metric??'count',top=integer(plan.top??10,'統計名額',1,100);if(!['artist','year','album','song'].includes(group)||!['count','best','average'].includes(metric))throw Error('統計條件不支援');if(plan.perYear!==undefined&&typeof plan.perYear!=='boolean')throw Error('逐年統計參數不正確');const map=new Map;for(const r of rows){let names=group==='artist'?artists(r.artist):[r[group]];if(group==='artist'&&plan.filters?.artists?.length)names=names.filter(a=>plan.filters.artists.some(q=>matches(q,a)));for(const name of names){const key=JSON.stringify([plan.perYear?r.year:null,name]);if(!map.has(key))map.set(key,{name,year:plan.perYear?r.year:null,rows:[]});map.get(key).rows.push(r)}}const batches=new Map;for(const g of map.values()){g.count=g.rows.length;g.best=Math.min(...g.rows.map(r=>r.rank));g.average=g.rows.reduce((a,r)=>a+r.rank,0)/g.count;const y=g.year??0;if(!batches.has(y))batches.set(y,[]);batches.get(y).push(g)}const groups=[];for(const [y,batch]of [...batches].sort((a,b)=>a[0]-b[0])){batch.sort((a,b)=>metric==='count'?b.count-a.count:a[metric]-b[metric]);const threshold=batch[Math.min(top,batch.length)-1]?.[metric];groups.push(...batch.filter(g=>metric==='count'?g.count>=threshold:g[metric]<=threshold))}return {type:'stats',groups,metric,group,total:rows.length,unavailable}}
+const count=integer(plan.count??5,'推薦首數',1,20);if(plan.distinct!==undefined&&typeof plan.distinct!=='boolean')throw Error('歌手分散參數不正確');let pool=[...rows],reference;if(plan.seedSong){const found=data.filter(r=>norm(r.song)===norm(plan.seedSong));if(!found.length)throw Error('找不到這首參考歌曲，請先搜尋確認歌名');if(new Set(found.map(r=>norm(r.artist))).size>1)throw Error('有同名的參考歌曲，請先確認歌手');reference=found[0];pool=pool.filter(r=>norm(r.song)!==norm(reference.song))}pool=pool.map(r=>({r,t:Math.random()})).sort((a,b)=>(reference?Math.abs(a.r.year-reference.year)-Math.abs(b.r.year-reference.year):0)||a.t-b.t).map(x=>x.r);const chosen=[],seen=new Set,people=new Set;for(const r of pool){const id=norm(r.song)+norm(r.artist),names=artists(r.artist).map(norm);if(seen.has(id)||(plan.distinct!==false&&names.some(a=>people.has(a))))continue;chosen.push(r);seen.add(id);names.forEach(a=>people.add(a));if(chosen.length===count)break}return {type:'recommend',rows:chosen,total:chosen.length,requested:count,reference,unavailable}}
+export function simplePlan(question,data){
+ const q=question.trim(),ys=[...q.matchAll(/(?:19|20)\d{2}/g)].map(x=>+x[0]),f={};
+ if(ys.length===1)f.years=ys;
+ else if(ys.length===2&&/到|至|–|~|～|-/.test(q)){f.start=ys[0];f.end=ys[1]}
+ else if(ys.length>1)f.years=ys;
+ if(/去年/.test(q))f.years=[2025];if(/今年/.test(q))f.years=[2026];
+ const nums={'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9,'十':10,'二十':20};
+ const m=q.match(/前\s*(\d+|二十|[一二三四五六七八九十])/);if(m)f.maxRank=nums[m[1]]||+m[1];
+ if(/冠軍|第一名/.test(q))f.maxRank=1;
+ const credits=[...new Set(data.flatMap(r=>artists(r.artist)))];
+ const persons=credits.filter(a=>q.includes(a));
+ for(const [name,aa]of Object.entries(aliasGroups))if(aa.some(a=>norm(q).includes(norm(a)))&&!persons.includes(name))persons.push(name);
+ if(persons.length)f.artists=[...new Set(persons.map(canonical))];
+ if(/不要|排除|除了|沒有|療癒|悲傷|空靈|女歌手|男歌手|幾分鐘|曲風|BPM/i.test(q))return null;
+ if(/最多|比較多/.test(q)&&/上榜|冠軍|第一名|紀錄/.test(q))return {tool:'stats',filters:f,group:'artist',top:persons.length?100:1,perYear:/每年|各年/.test(q)};
+ if(/最好|最佳/.test(q)&&persons.length)return {tool:'stats',filters:f,group:'song',metric:'best',top:1};
+ if(/推薦/.test(q))return null;
+ if(ys.length&&m)return {tool:'query',filters:f};
+ if(persons.length&&/上榜|紀錄|歌曲|幾首|冠軍|第一名|哪年/.test(q))return {tool:'query',filters:f};
+ const matchedSongs=data.filter(r=>q.includes(r.song)&&r.song.length>=3).sort((a,b)=>b.song.length-a.song.length);
+ if(matchedSongs.length&&!/和|跟|以及/.test(q.replace(matchedSongs[0].song,'')))return {tool:'query',filters:{...f,song:matchedSongs[0].song}};
+ if(q.length<30&&!/[？?]/.test(q)){const a=credits.find(a=>norm(a)===norm(q));if(a)return {tool:'query',filters:{artists:[a]}};const song=data.find(r=>norm(r.song)===norm(q.replace(/[〈〉《》]/g,'')));if(song)return {tool:'query',filters:{song:song.song}}}
+ return null;
+}
